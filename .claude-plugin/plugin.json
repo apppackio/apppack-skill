@@ -1,0 +1,13 @@
+{
+  "name": "apppack",
+  "description": "Expert assistant for AppPack PaaS tasks: CLI commands, deployments, addons, clusters, pipelines, and troubleshooting on AWS.",
+  "version": "1.0.0",
+  "author": {
+    "name": "AppPack",
+    "url": "https://github.com/apppackio"
+  },
+  "homepage": "https://apppack.io",
+  "repository": "https://github.com/apppackio/apppack-skill",
+  "license": "Apache-2.0",
+  "keywords": ["apppack", "paas", "aws", "deployment", "cli"]
+}
