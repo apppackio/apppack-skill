@@ -119,7 +119,11 @@ For `create`, `destroy`, `upgrade`, `modify`, `reviewapps`, `scheduled-tasks`, `
   `--addon-redis-name` disambiguate. On older CLIs the `-name` variants are mandatory.
 - **Always pass `--cidr` to `create cluster`.** It defaults to `10.100.0.0/16`, which collides
   with an existing VPC more often than you'd think. Check first:
-  `aws ec2 describe-vpcs --query 'Vpcs[*].[CidrBlock,Tags[?Key==\`Name\`].Value|[0]]' --output table`
+
+  ```bash
+  aws ec2 describe-vpcs --query 'Vpcs[*].[CidrBlock,Tags[?Key==`Name`].Value|[0]]' --output table
+  ```
+
 - Pass `--domain` to `create cluster` too — omitting it risks wildcard DNS conflicts between
   clusters.
 - Most `destroy` and `upgrade` subcommands take a required `<name>` argument.
