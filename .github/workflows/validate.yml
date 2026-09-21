@@ -1,0 +1,48 @@
+name: validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Claude Code
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Validate plugin and marketplace manifests
+        run: claude plugin validate . --strict
+
+      - name: Check SKILL.md frontmatter
+        run: |
+          set -euo pipefail
+          for skill in skills/*/SKILL.md; do
+            echo "checking $skill"
+            head -1 "$skill" | grep -qx -- '---' \
+              || { echo "::error file=$skill::missing YAML frontmatter"; exit 1; }
+            awk 'NR>1 && /^---$/{exit} NR>1' "$skill" | grep -q '^name:' \
+              || { echo "::error file=$skill::frontmatter missing 'name'"; exit 1; }
+            awk 'NR>1 && /^---$/{exit} NR>1' "$skill" | grep -q '^description:' \
+              || { echo "::error file=$skill::frontmatter missing 'description'"; exit 1; }
+          done
+
+      - name: Check referenced files exist
+        run: |
+          set -euo pipefail
+          status=0
+          for skill in skills/*/SKILL.md; do
+            dir=$(dirname "$skill")
+            grep -oE 'references/[A-Za-z0-9._/-]+\.md' "$skill" | sort -u | while read -r ref; do
+              if [ ! -f "$dir/$ref" ]; then
+                echo "::error file=$skill::references missing file $ref"
+                exit 1
+              fi
+            done || status=1
+          done
+          exit $status
