@@ -4,9 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Weekly, so a CLI release landing between PRs doesn't leave the reference stale.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
 
 jobs:
-  validate:
+  manifests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,14 +39,35 @@ jobs:
       - name: Check referenced files exist
         run: |
           set -euo pipefail
-          status=0
           for skill in skills/*/SKILL.md; do
             dir=$(dirname "$skill")
-            grep -oE 'references/[A-Za-z0-9._/-]+\.md' "$skill" | sort -u | while read -r ref; do
-              if [ ! -f "$dir/$ref" ]; then
-                echo "::error file=$skill::references missing file $ref"
-                exit 1
-              fi
-            done || status=1
+            for ref in $(grep -oE 'references/[A-Za-z0-9._/-]+\.md' "$skill" | sort -u); do
+              [ -f "$dir/$ref" ] \
+                || { echo "::error file=$skill::references missing file $ref"; exit 1; }
+            done
           done
-          exit $status
+
+  cli-reference:
+    name: CLI reference is current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: extractions/setup-just@v2
+
+      - name: Install latest released apppack CLI
+        run: |
+          set -euo pipefail
+          tag=$(gh release view --repo apppackio/apppack --json tagName -q .tagName)
+          version="${tag#v}"
+          echo "installing apppack $version"
+          curl -fsSL -o /tmp/apppack.tar.gz \
+            "https://github.com/apppackio/apppack/releases/download/${tag}/apppack_${version}_Linux_x86_64.tar.gz"
+          tar -xzf /tmp/apppack.tar.gz -C /tmp apppack
+          install -m 0755 /tmp/apppack /usr/local/bin/apppack
+          apppack version
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Fail if the committed CLI reference is stale
+        run: just check-cli-docs

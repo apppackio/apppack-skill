@@ -31,17 +31,26 @@ claude --plugin-dir ./apppack-skill
 
 ## What it covers
 
-- **Correct command signatures.** The reference is verified against the CLI source, including
-  the places where the CLI surprises people: `ps resize` takes CPU *cores* and a memory suffix,
-  `events` requires a service argument, `config export` emits JSON rather than shell exports,
-  and `build wait` is a stub that always errors.
-- **Which flags are actually global.** Only `--debug` and `--json` are. `--aws-credentials`,
-  `-c/--account`, and `--region` are per-command, and `-a/--app-name` is required on eleven
-  command groups with no environment-variable fallback.
-- **Where state lives.** AppPack reads no `apppack.toml` or `Procfile`; config is in SSM and app
-  shape is in CloudFormation stack parameters. The skill corrects the Heroku/Fly assumption.
-- **Guardrails.** `destroy` is irreversible and admin-only; secrets from `config get` never get
-  echoed into a transcript.
+Ask Claude to scale a process, wire up a database, chase a failing build, or explain what a
+cluster actually is, and it answers from this skill rather than from half-remembered Heroku
+habits.
+
+**The whole command surface.** Every command and flag, rendered straight from the CLI's own
+`apppack docgen` output. It describes the version that shipped, not whatever was true the last
+time someone hand-edited a Markdown file.
+
+**How an app is configured.** The `Procfile`, `apppack.toml` and `app.json` in your repo — what
+each one controls, which wins when both exist, and which keys apply only to Dockerfile builds
+versus buildpack builds. Plus the parts that live outside the repo: config in SSM Parameter
+Store, app shape in CloudFormation stack parameters.
+
+**The traps.** Places where AppPack does something other than what you'd guess: flags that look
+global but are registered per command, a memory flag that rejects a bare number, a subcommand
+that now exists only to tell you it was replaced. These are the mistakes that cost an afternoon,
+and they're why the reference is generated rather than written by hand.
+
+**Care around the sharp edges.** `destroy` is irreversible and admin-only, so Claude confirms the
+target before running one, and secrets read out of `config` don't get echoed into your scrollback.
 
 ## Layout
 
@@ -50,25 +59,38 @@ claude --plugin-dir ./apppack-skill
   plugin.json                     # plugin manifest
   marketplace.json                # self-hosted marketplace entry
 skills/apppack/
-  SKILL.md                        # loaded when the skill triggers
-  references/cli.md               # full command surface, loaded on demand
+  SKILL.md                        # curated; loaded when the skill triggers
+  references/cli.md               # GENERATED; full command surface, loaded on demand
+scripts/gen_cli_reference.py      # docgen output -> references/cli.md
+Justfile                          # just cli-docs / check-cli-docs / validate
 ```
 
-`SKILL.md` is deliberately short — it holds concepts, the commands people actually run, and the
-gotchas. The exhaustive flag-by-flag reference lives in `references/cli.md` so it costs nothing
-until Claude needs it.
+`SKILL.md` is deliberately short — concepts, the commands people actually run, and the gotchas.
+The exhaustive flag-by-flag reference lives in `references/cli.md` so it costs nothing until
+Claude needs it.
 
 ## Contributing
 
-The CLI is the source of truth. When a command changes, update `references/cli.md`, and
-`SKILL.md` too if it's something a user hits often. `apppack docgen` (a hidden command) emits the
-Markdown tree that powers <https://docs.apppack.io/command-line-reference/> and is the best way
-to diff the real surface against these docs.
-
-Validate manifests before opening a PR — CI runs the same check:
+**`skills/apppack/references/cli.md` is generated — do not hand-edit it.** It is rendered from
+`apppack docgen`, which is the CLI's own cobra command tree and therefore cannot drift. Regenerate
+after a CLI change:
 
 ```bash
-claude plugin validate .
+just cli-docs
+```
+
+CI runs `just check-cli-docs` on every PR and weekly against the latest CLI release; it fails if
+the committed reference no longer matches, so a new flag can't ship undocumented.
+
+Curated knowledge that docgen *cannot* know — version history, operational advice, why a default
+is dangerous — belongs in `SKILL.md`, not in the generated file. Avoid restating generated facts
+(flag lists, defaults) in `SKILL.md`: duplicated facts drift, which is the problem this setup
+exists to prevent.
+
+Before opening a PR:
+
+```bash
+just check    # validate manifests + CLI reference freshness
 ```
 
 ## Links

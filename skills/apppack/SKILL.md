@@ -18,16 +18,44 @@ CLI.
 - **Cluster** — a VPC + ECS cluster hosting apps. Default cluster is named `apppack`.
 - **Account** — an AWS account AppPack manages. Selected with `-c/--account` on admin commands.
 
-## Critical: there is no local config file
+## Where configuration lives
 
-AppPack reads **no** `apppack.toml`, `app.json`, or `Procfile` from the repo. Do not invent one,
-and correct users who assume a Heroku/Fly-style manifest. State lives in three places:
+Three files in the repository root configure an app. They are read **server-side at build time**
+by the AppPack builder, not by the `apppack` CLI — so grepping the CLI source for them finds
+nothing. That is a fact about where the parsing happens, not evidence they are unused.
+
+**`Procfile`** — required for buildpack apps. YAML, one service per line. `web` is special: it
+gets the load balancer and is told which port to bind via `$PORT`. A `release:` key defines a
+one-shot task that runs before each deploy rather than a long-running service.
+
+```yaml
+web: gunicorn --bind=0.0.0.0:$PORT myapp:application
+worker: celery --app myapp.celery.app worker
+release: python manage.py migrate --noinput
+```
+
+**`apppack.toml`** — build, test and deploy configuration. Full reference:
+<https://docs.apppack.io/how-to/apps/apppack_toml/>
+
+| Key | Purpose |
+|---|---|
+| `build.system` | `buildpack` (default) or `dockerfile` |
+| `build.buildpacks` / `build.builder` | Explicit buildpacks instead of autodetection |
+| `build.dockerfile` | Dockerfile path (default `Dockerfile`) |
+| `test.command` / `test.env` | Test command and its environment |
+| `deploy.release_command` | Release task — **Dockerfile builds only**; buildpack apps use the `Procfile` `release` key |
+| `review_app.initialize_command` / `.pre_destroy_command` | Review-app setup/teardown (Heroku's `postdeploy` / `pr-predestroy`) |
+| `[services.<name>].command` | Service definitions for **Dockerfile builds only** — `[services.web]` is required there; buildpack apps use the `Procfile` |
+
+**`app.json`** — partial Heroku compatibility (`buildpacks`, `environments.test`, `scripts`,
+`stack`). **Ignored entirely if `apppack.toml` exists.**
+
+Everything else lives outside the repo:
 
 | What | Where | Changed by |
 |---|---|---|
 | Env vars / secrets | SSM Parameter Store | `apppack config set` |
 | App shape (repo, branch, domains, healthcheck) | CloudFormation stack parameters | `apppack create app`, `apppack modify app` |
-| Build behavior | Buildpack autodetection, server-side | source code layout |
 
 Local disk holds only an auth/version cache in the OS user cache directory under `io.apppack`
 (`~/Library/Caches/io.apppack` on macOS, `$XDG_CACHE_HOME/io.apppack` or `~/.cache/io.apppack`
@@ -42,18 +70,14 @@ cobra's built-in `-h/--help`):
 - `--json` — machine-readable output. Supported by `ps`, `config list`, `auth apps`,
   `build list`, `build status`, `scheduled-tasks`, and others. Prefer it when parsing output.
 
-Everything else is **per-command**. These are commonly assumed global but are not:
+Everything else is **per-command**, including four that are routinely mistaken for global:
+`--aws-credentials`, `-c/--account`, `--region`, and `-a/--app-name`. Passing one to a command
+that doesn't register it is an error. `references/cli.md` has the authoritative
+"Scoped flags — NOT global" table listing exactly which groups accept each — consult it rather
+than assuming, and rather than trusting any list written here.
 
-- `--aws-credentials` — use local AWS creds instead of AppPack federation. Present on most
-  resource commands, but **not** on `auth`, `modify`, `version`, or `aws-exec`.
-- `-c/--account` — `create`, `destroy`, `upgrade`, `stacks`, `access`, `admins`, `modify app`,
-  and `reviewapps` (hidden there, and ignored with a warning).
-- `--region` — a shorter list than `--account`: only `create`, `destroy`, `upgrade`, `access`.
-
-`-a/--app-name` is a persistent flag on 12 command groups and **required** on 11 of them:
-`access`, `aws-exec`, `build`, `config`, `dash`, `db`, `events`, `logs`, `open`, `ps`, `shell`.
-(`scheduled-tasks` accepts it but does not mark it required.) There is **no environment-variable
-fallback** — pass it explicitly:
+`-a/--app-name` is required on most app-scoped commands and has **no environment-variable
+fallback** — pass it explicitly every time:
 
 ```bash
 apppack config set -a my-app DEBUG=false
@@ -111,6 +135,10 @@ For `create`, `destroy`, `upgrade`, `modify`, `reviewapps`, `scheduled-tasks`, `
   `build watch`. (`build start --wait` still works as a deprecated alias for `-w/--watch`.)
 - `ps resize`/`ps exec`/`shell` take `--cpu` in **cores** (`2`, `0.5`) and `--memory` with a
   **unit suffix** (`4G`, `512M`). A bare `--memory 1024` is rejected.
+- On `ps resize`, `--cpu` and `--memory` are **both mandatory** despite `references/cli.md`
+  showing defaults for them — cobra permits a flag to have a default and still be required, and
+  docgen cannot show that. Omitting either gives
+  `Error: required flag(s) "cpu", "memory" not set`.
 - `--addon-database` / `--addon-redis` on `create app` and `create pipeline` **attach to an
   existing instance — they do not provision one.** Run `apppack create database` /
   `apppack create redis` first. These flags were silently **no-ops before CLI v4.8.1**
@@ -127,6 +155,8 @@ For `create`, `destroy`, `upgrade`, `modify`, `reviewapps`, `scheduled-tasks`, `
 - Pass `--domain` to `create cluster` too — omitting it risks wildcard DNS conflicts between
   clusters.
 - Most `destroy` and `upgrade` subcommands take a required `<name>` argument.
+- `create custom-domain` accepts **1 to 6** domains — one primary plus up to five alternates.
+  More than six is rejected.
 - `destroy` requires account administrator permissions and is irreversible. Confirm the target
   with the user before running one.
 - Scaling `web 1-5` is CPU-based autoscaling; a bare integer is a fixed count.
