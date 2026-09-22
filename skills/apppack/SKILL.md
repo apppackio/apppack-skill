@@ -18,16 +18,44 @@ CLI.
 - **Cluster** — a VPC + ECS cluster hosting apps. Default cluster is named `apppack`.
 - **Account** — an AWS account AppPack manages. Selected with `-c/--account` on admin commands.
 
-## Critical: there is no local config file
+## Where configuration lives
 
-AppPack reads **no** `apppack.toml`, `app.json`, or `Procfile` from the repo. Do not invent one,
-and correct users who assume a Heroku/Fly-style manifest. State lives in three places:
+Three files in the repository root configure an app. They are read **server-side at build time**
+by the AppPack builder, not by the `apppack` CLI — so grepping the CLI source for them finds
+nothing. That is a fact about where the parsing happens, not evidence they are unused.
+
+**`Procfile`** — required for buildpack apps. YAML, one service per line. `web` is special: it
+gets the load balancer and is told which port to bind via `$PORT`. A `release:` key defines a
+one-shot task that runs before each deploy rather than a long-running service.
+
+```yaml
+web: gunicorn --bind=0.0.0.0:$PORT myapp:application
+worker: celery --app myapp.celery.app worker
+release: python manage.py migrate --noinput
+```
+
+**`apppack.toml`** — build, test and deploy configuration. Full reference:
+<https://docs.apppack.io/how-to/apps/apppack_toml/>
+
+| Key | Purpose |
+|---|---|
+| `build.system` | `buildpack` (default) or `dockerfile` |
+| `build.buildpacks` / `build.builder` | Explicit buildpacks instead of autodetection |
+| `build.dockerfile` | Dockerfile path (default `Dockerfile`) |
+| `test.command` / `test.env` | Test command and its environment |
+| `deploy.release_command` | Release task — **Dockerfile builds only**; buildpack apps use the `Procfile` `release` key |
+| `review_app.initialize_command` / `.pre_destroy_command` | Review-app setup/teardown (Heroku's `postdeploy` / `pr-predestroy`) |
+| `[services.<name>].command` | Service definitions for **Dockerfile builds only** — `[services.web]` is required there; buildpack apps use the `Procfile` |
+
+**`app.json`** — partial Heroku compatibility (`buildpacks`, `environments.test`, `scripts`,
+`stack`). **Ignored entirely if `apppack.toml` exists.**
+
+Everything else lives outside the repo:
 
 | What | Where | Changed by |
 |---|---|---|
 | Env vars / secrets | SSM Parameter Store | `apppack config set` |
 | App shape (repo, branch, domains, healthcheck) | CloudFormation stack parameters | `apppack create app`, `apppack modify app` |
-| Build behavior | Buildpack autodetection, server-side | source code layout |
 
 Local disk holds only an auth/version cache in the OS user cache directory under `io.apppack`
 (`~/Library/Caches/io.apppack` on macOS, `$XDG_CACHE_HOME/io.apppack` or `~/.cache/io.apppack`
