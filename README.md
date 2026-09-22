@@ -50,25 +50,38 @@ claude --plugin-dir ./apppack-skill
   plugin.json                     # plugin manifest
   marketplace.json                # self-hosted marketplace entry
 skills/apppack/
-  SKILL.md                        # loaded when the skill triggers
-  references/cli.md               # full command surface, loaded on demand
+  SKILL.md                        # curated; loaded when the skill triggers
+  references/cli.md               # GENERATED; full command surface, loaded on demand
+scripts/gen_cli_reference.py      # docgen output -> references/cli.md
+Justfile                          # just cli-docs / check-cli-docs / validate
 ```
 
-`SKILL.md` is deliberately short — it holds concepts, the commands people actually run, and the
-gotchas. The exhaustive flag-by-flag reference lives in `references/cli.md` so it costs nothing
-until Claude needs it.
+`SKILL.md` is deliberately short — concepts, the commands people actually run, and the gotchas.
+The exhaustive flag-by-flag reference lives in `references/cli.md` so it costs nothing until
+Claude needs it.
 
 ## Contributing
 
-The CLI is the source of truth. When a command changes, update `references/cli.md`, and
-`SKILL.md` too if it's something a user hits often. `apppack docgen` (a hidden command) emits the
-Markdown tree that powers <https://docs.apppack.io/command-line-reference/> and is the best way
-to diff the real surface against these docs.
-
-Validate manifests before opening a PR — CI runs the same check:
+**`skills/apppack/references/cli.md` is generated — do not hand-edit it.** It is rendered from
+`apppack docgen`, which is the CLI's own cobra command tree and therefore cannot drift. Regenerate
+after a CLI change:
 
 ```bash
-claude plugin validate .
+just cli-docs
+```
+
+CI runs `just check-cli-docs` on every PR and weekly against the latest CLI release; it fails if
+the committed reference no longer matches, so a new flag can't ship undocumented.
+
+Curated knowledge that docgen *cannot* know — version history, operational advice, why a default
+is dangerous — belongs in `SKILL.md`, not in the generated file. Avoid restating generated facts
+(flag lists, defaults) in `SKILL.md`: duplicated facts drift, which is the problem this setup
+exists to prevent.
+
+Before opening a PR:
+
+```bash
+just check    # validate manifests + CLI reference freshness
 ```
 
 ## Links

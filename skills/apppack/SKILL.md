@@ -42,18 +42,14 @@ cobra's built-in `-h/--help`):
 - `--json` — machine-readable output. Supported by `ps`, `config list`, `auth apps`,
   `build list`, `build status`, `scheduled-tasks`, and others. Prefer it when parsing output.
 
-Everything else is **per-command**. These are commonly assumed global but are not:
+Everything else is **per-command**, including four that are routinely mistaken for global:
+`--aws-credentials`, `-c/--account`, `--region`, and `-a/--app-name`. Passing one to a command
+that doesn't register it is an error. `references/cli.md` has the authoritative
+"Scoped flags — NOT global" table listing exactly which groups accept each — consult it rather
+than assuming, and rather than trusting any list written here.
 
-- `--aws-credentials` — use local AWS creds instead of AppPack federation. Present on most
-  resource commands, but **not** on `auth`, `modify`, `version`, or `aws-exec`.
-- `-c/--account` — `create`, `destroy`, `upgrade`, `stacks`, `access`, `admins`, `modify app`,
-  and `reviewapps` (hidden there, and ignored with a warning).
-- `--region` — a shorter list than `--account`: only `create`, `destroy`, `upgrade`, `access`.
-
-`-a/--app-name` is a persistent flag on 12 command groups and **required** on 11 of them:
-`access`, `aws-exec`, `build`, `config`, `dash`, `db`, `events`, `logs`, `open`, `ps`, `shell`.
-(`scheduled-tasks` accepts it but does not mark it required.) There is **no environment-variable
-fallback** — pass it explicitly:
+`-a/--app-name` is required on most app-scoped commands and has **no environment-variable
+fallback** — pass it explicitly every time:
 
 ```bash
 apppack config set -a my-app DEBUG=false
@@ -111,6 +107,10 @@ For `create`, `destroy`, `upgrade`, `modify`, `reviewapps`, `scheduled-tasks`, `
   `build watch`. (`build start --wait` still works as a deprecated alias for `-w/--watch`.)
 - `ps resize`/`ps exec`/`shell` take `--cpu` in **cores** (`2`, `0.5`) and `--memory` with a
   **unit suffix** (`4G`, `512M`). A bare `--memory 1024` is rejected.
+- On `ps resize`, `--cpu` and `--memory` are **both mandatory** despite `references/cli.md`
+  showing defaults for them — cobra permits a flag to have a default and still be required, and
+  docgen cannot show that. Omitting either gives
+  `Error: required flag(s) "cpu", "memory" not set`.
 - `--addon-database` / `--addon-redis` on `create app` and `create pipeline` **attach to an
   existing instance — they do not provision one.** Run `apppack create database` /
   `apppack create redis` first. These flags were silently **no-ops before CLI v4.8.1**
@@ -127,6 +127,8 @@ For `create`, `destroy`, `upgrade`, `modify`, `reviewapps`, `scheduled-tasks`, `
 - Pass `--domain` to `create cluster` too — omitting it risks wildcard DNS conflicts between
   clusters.
 - Most `destroy` and `upgrade` subcommands take a required `<name>` argument.
+- `create custom-domain` accepts **1 to 6** domains — one primary plus up to five alternates.
+  More than six is rejected.
 - `destroy` requires account administrator permissions and is irreversible. Confirm the target
   with the user before running one.
 - Scaling `web 1-5` is CPU-based autoscaling; a bare integer is a fixed count.
