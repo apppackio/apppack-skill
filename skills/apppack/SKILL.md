@@ -11,11 +11,24 @@ CLI.
 
 ## Concepts
 
-- **App** — a containerized service. Backed by a CloudFormation stack; built with Cloud Native
-  Buildpacks.
-- **Pipeline** — an app template that spawns *review apps* per pull request.
-- **Addon** — a managed AWS resource attached to an app: database, Redis, S3, SQS, SES.
-- **Cluster** — a VPC + ECS cluster hosting apps. Default cluster is named `apppack`.
+- **App** — a set of independently scalable **services** (process types), backed by a
+  CloudFormation stack. Built either with Cloud Native Buildpacks (default) or from a
+  Dockerfile; both are fully supported and the choice changes how you configure the app.
+- **Cluster** — a VPC + ECS cluster + shared Application Load Balancer, in **one AWS region**.
+  Crucially it owns a **domain**: every app is automatically served at
+  `<appname>.<cluster_domain>`. Default cluster name is `apppack`. Compute is Fargate by
+  default, EC2 optional.
+- **Pipeline** — a special app tied to a repository rather than a branch. It runs **no services
+  of its own**; it holds shared resources (CodeBuild project, config, IAM roles) and defines the
+  add-ons that each review app inherits.
+- **Review app** — a temporary app built from a pull request. **Not created automatically** —
+  you run `apppack reviewapps create <pipeline>:<pr-number>` explicitly, and address it as
+  `-a <pipeline>:<pr-number>`. Served at `https://pr<pr>-<pipeline>.<cluster_domain>`.
+- **Addon** — a managed AWS resource. The sharing model differs and it matters:
+  - **Database / Redis** — **cluster-level instances shared by many apps.** An admin creates the
+    instance once; enabling the addon gives the app its own DB+user (or Redis user + key
+    prefix) on it.
+  - **S3 (public or private) / SQS / SES** — genuinely per-app resources.
 - **Account** — an AWS account AppPack manages. Selected with `-c/--account` on admin commands.
 
 ## Where configuration lives
@@ -24,38 +37,79 @@ Three files in the repository root configure an app. They are read **server-side
 by the AppPack builder, not by the `apppack` CLI — so grepping the CLI source for them finds
 nothing. That is a fact about where the parsing happens, not evidence they are unused.
 
-**`Procfile`** — required for buildpack apps. YAML, one service per line. `web` is special: it
-gets the load balancer and is told which port to bind via `$PORT`. A `release:` key defines a
-one-shot task that runs before each deploy rather than a long-running service.
+**`Procfile`** — declares services for buildpack apps, in Heroku's `name: command` format, one
+per line. It is **not YAML** — do not quote or escape as if it were; commands routinely contain
+`:` and `*` that would be invalid YAML.
 
-```yaml
+```
 web: gunicorn --bind=0.0.0.0:$PORT myapp:application
 worker: celery --app myapp.celery.app worker
 release: python manage.py migrate --noinput
 ```
+
+Strictly it is *optional* — buildpacks can contribute default process types via the CNB
+lifecycle — but in practice you want one, and you almost always need a `web` service (see
+reserved process types below).
 
 **`apppack.toml`** — build, test and deploy configuration. Full reference:
 <https://docs.apppack.io/how-to/apps/apppack_toml/>
 
 | Key | Purpose |
 |---|---|
-| `build.system` | `buildpack` (default) or `dockerfile` |
+| `build.system` | `dockerfile`, or omit for buildpacks. **Matched as an exact string against `dockerfile`** — anything else (`Dockerfile`, `docker`, a typo) silently produces a *buildpack* build with no error |
 | `build.buildpacks` / `build.builder` | Explicit buildpacks instead of autodetection |
 | `build.dockerfile` | Dockerfile path (default `Dockerfile`) |
-| `test.command` / `test.env` | Test command and its environment |
+| `test.command` / `test.env` | Test command, and env vars for **building *and* testing** — `test.env` is the only documented way to set build-time variables |
 | `deploy.release_command` | Release task — **Dockerfile builds only**; buildpack apps use the `Procfile` `release` key |
-| `review_app.initialize_command` / `.pre_destroy_command` | Review-app setup/teardown (Heroku's `postdeploy` / `pr-predestroy`) |
-| `[services.<name>].command` | Service definitions for **Dockerfile builds only** — `[services.web]` is required there; buildpack apps use the `Procfile` |
+| `review_app.initialize_command` | Review-app setup (Heroku's `postdeploy`) |
+| `review_app.predestroy_command` | Review-app teardown (Heroku's `pr-predestroy`). **Note the spelling** — see below |
+| `[services.<name>].command` | Service definitions for **Dockerfile builds only**; buildpack apps use the `Procfile` |
+
+> **`predestroy_command`, not `pre_destroy_command`.** The published docs show
+> `pre_destroy_command`, but the orchestrator's model only accepts `predestroy_command` and
+> silently discards unknown keys — so the documented spelling parses without error and the
+> command never runs. Use `predestroy_command`.
 
 **`app.json`** — partial Heroku compatibility (`buildpacks`, `environments.test`, `scripts`,
 `stack`). **Ignored entirely if `apppack.toml` exists.**
 
-Everything else lives outside the repo:
+## Reserved process types
+
+Six names are special. **Do not use them for your own services** — collisions fail silently
+rather than erroring:
+
+| Name | Role |
+|---|---|
+| `web` | Gets the load balancer. Effectively **required**: config-var and scaling changes are keyed off the `web` task definition, so an app without one silently stops processing `config set` and `ps scale`. Bind the port given in `$PORT`. |
+| `release` | One-shot task before each deploy. Failure halts the deploy. |
+| `shell` | Backs `ps exec` and `db shell`. Always registered — a *user* process named `shell` is force-scaled to **zero tasks**. |
+| `scheduler` | Runs `scheduled-tasks` commands. Always registered — a user process named `scheduler` collides with it. |
+| `postdeploy` | Runs `review_app.initialize_command`. |
+| `pr-predestroy` | Runs `review_app.predestroy_command`. |
+
+None of these is backed by a long-running service; their task definitions are registered at run
+time. Two consequences worth knowing:
+
+- **`apppack ps` won't list them** until one is actually running. That is normal, not a fault.
+- **`apppack ps resize` works on them ahead of time**, storing CPU/memory for the next run. This
+  is how you give a migration or a `shell` session more memory.
+
+`[test]` is not a process type at all — it runs inside the build container, so it never appears
+in `ps`.
+
+On Ruby buildpack apps, the process types `console` and `rake` are dropped automatically.
+
+## Where the rest of the state lives
 
 | What | Where | Changed by |
 |---|---|---|
 | Env vars / secrets | SSM Parameter Store | `apppack config set` |
 | App shape (repo, branch, domains, healthcheck) | CloudFormation stack parameters | `apppack create app`, `apppack modify app` |
+| **Scaling** (counts, CPU/memory) | **SSM**, not CloudFormation | `apppack ps scale` / `ps resize` |
+| **Scheduled tasks** | **EventBridge rules**, driven from SSM | `apppack scheduled-tasks` |
+
+Scaling and scheduled-task changes are SSM writes that an external orchestrator reacts to, which
+is why those commands return before anything has visibly happened.
 
 Local disk holds only an auth/version cache in the OS user cache directory under `io.apppack`
 (`~/Library/Caches/io.apppack` on macOS, `$XDG_CACHE_HOME/io.apppack` or `~/.cache/io.apppack`
@@ -125,9 +179,15 @@ apppack db load -a my-app dump.sql         # positional dumpfile required (local
 apppack aws-exec -a my-app -- aws s3 ls
 ```
 
-For `create`, `destroy`, `upgrade`, `modify`, `reviewapps`, `scheduled-tasks`, `access`, and
-`admins` — plus the full flag surface of everything above — read
-`references/cli.md` in this skill.
+Two reference files ship with this skill — read them rather than guessing:
+
+- **`references/cli.md`** — the complete command and flag surface, generated from
+  `apppack docgen`. Use it for `create`, `destroy`, `upgrade`, `modify`, `reviewapps`,
+  `scheduled-tasks`, `access`, `admins`, and the full flag list of everything above.
+- **`references/platform.md`** — how the platform behaves around the commands: the full
+  environment-variable model, what a Dockerfile image must contain for `ps exec` to work, the
+  build/release/deploy sequence, domains and TLS, review-app specifics, regions, healthchecks,
+  and cost.
 
 ## Gotchas
 
@@ -152,18 +212,27 @@ For `create`, `destroy`, `upgrade`, `modify`, `reviewapps`, `scheduled-tasks`, `
   aws ec2 describe-vpcs --query 'Vpcs[*].[CidrBlock,Tags[?Key==`Name`].Value|[0]]' --output table
   ```
 
-- Pass `--domain` to `create cluster` too — omitting it risks wildcard DNS conflicts between
-  clusters.
+- `create cluster` also needs `--domain`. This is not hygiene — the cluster domain is its
+  identity for DNS and TLS, and is what gives every app its `<app>.<cluster_domain>` URL.
 - Most `destroy` and `upgrade` subcommands take a required `<name>` argument.
 - `create custom-domain` accepts **1 to 6** domains — one primary plus up to five alternates.
   More than six is rejected.
-- `destroy` requires account administrator permissions and is irreversible. Confirm the target
-  with the user before running one.
-- Scaling `web 1-5` is CPU-based autoscaling; a bare integer is a fixed count.
+- **`destroy app` erases addon *data*, not just the stack** — the database, S3 bucket and its
+  files, and the SQS queue all go. Redis data is the one documented exception. This is
+  irreversible and admin-only; confirm the exact target with the user before running it.
+- **Administrator access is needed for more than `destroy`**: `create app`, `create database`,
+  `create redis` and `create custom-domain` all require it. Creating and destroying *review
+  apps* is the deliberate exception — any user with Pipeline access can do it.
+- **`config set` triggers a full redeploy** of every service. It is not a passive write, so
+  batch changes rather than setting variables one at a time.
+- Scaling `web 1-5` is CPU-based autoscaling; a bare integer is a fixed count. **Review apps
+  support neither autoscaling nor scheduled tasks.**
 
 ## Working with this skill
 
-1. Prefer the tables above and `references/cli.md` — they are verified against the CLI source.
+1. Prefer this file and the two reference files. `references/cli.md` is generated from the CLI
+   itself; the conceptual material is verified against the AppPack docs and the orchestrator
+   implementation.
 2. Run `apppack <command> --help` to confirm a signature before running anything destructive or
    unfamiliar. The CLI is the source of truth; this skill can lag it.
 3. WebFetch `https://docs.apppack.io/` for conceptual guides and anything not covered here:
